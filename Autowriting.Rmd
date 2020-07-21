@@ -1,0 +1,218 @@
+# Automated writing with glue
+
+In the Roper Lab, one of the things we are trying to do is use code to make local news -- take a dataset of statewide scope and use code and some simple tricks to create locally relevant news out of it. 
+
+We can do this two ways, demonstrated here: Writing text, and creating graphics. 
+
+```{r}
+library(tidyverse)
+library(glue)
+```
+
+Need to import the two needed datasets, which are, in this case, a dataset of pandemic unemployment claims by county from the state of Nebraska and a dataset of local area unemployment numbers from the federal government. What we're interested in, from the beginning, is a *percentage* of unemployment claims as a part of the total workforce. In Nebraska, there's a small few counties with significant population, and then a steep dropoff with lots of small counties. So it would be a population map if we were to show where unemployment claims came from. We need to create a percentage to be able to compare where the pain of the pandemic is worse than others. 
+
+```{r}
+stateclaims <- read_csv("countyunemployment.csv") %>% mutate(Claims = as.numeric(Claims))
+```
+
+```{r}
+federaldata <- read_csv("neunemployment.csv")
+```
+Now, to set myself up for later, I'm going to work with the federal data first. I'm going to make the county column in the federal data match my state data. In my state data, the county column just has the name of the county -- "Washington" or "Douglas". In the federal data, it adds " County, NE" to each county. So any attempt to join them is going to require making them the same. I'm choosing to eliminate the " County, NE" in the federal data. I'm also going to create a GEOID column to make mapping easier later.
+
+```{r}
+laborforce <- federaldata %>% 
+  mutate(County = gsub(" County, NE", "", County), GEOID = paste(StateFIPS, CountyFIPS, sep="")) %>% 
+  filter(Period == "Mar-20") %>% select(County, GEOID, LaborForce) 
+```
+
+Now, my state data is one week's claim numbers for each county, with many weeks included. So I need to group them together by county and sum them up. So all of the claims merged together into one number for each county. Then I'm going to filter out counties with 0 or NA for their counts. 
+
+```{r}
+countycounts <- stateclaims %>% 
+  group_by(County) %>% 
+  summarize(total = sum(as.numeric(Claims))) %>% 
+  filter(total > 0)
+```
+```{r}
+lastyearunemployment <- federaldata %>% 
+  filter(Period == "Feb-20")
+```
+
+What comes next is a custom function to make an ordinal ranking for each county. When I write a sentence, I don't say Hall County ranked 1. I would write the rank first. So to do that, and maintain AP Style, I need to create a custom function that does this. 
+
+```{r}
+# Create lists of the oddball numbers that get something other than th
+firsts <- c(21, 31, 41, 51, 61, 71, 81, 91)
+seconds <- c(22, 32, 42, 52, 62, 72, 82, 92)
+thirds <- c(23, 33, 43, 53, 63, 73, 83, 93)
+
+# Now we start a list of if else, where we deal with the odd cases, then the lists, then all the other numbers with th
+
+
+apstyleordinal <- function(x){
+  if (x >= 100) stop("Numbers 100 or greater not supported") # basic error trapping
+else if (x == 1) {
+  ordval <- "first"
+} else if (x == 2) {
+  ordval <- "second"
+} else if (x == 3) {
+  ordval <- "third"
+} else if (x == 4) {
+  ordval <- "fourth"
+} else if (x == 5) {
+  ordval <- "fifth"
+} else if (x == 6) {
+  ordval <- "sixth"
+} else if (x == 7) {
+  ordval <- "seventh"
+} else if (x == 8) {
+  ordval <- "eighth"
+} else if (x == 9) {
+  ordval <- "ninth"
+} else if (x %in% firsts) {
+  ordval <- paste(x,"st", sep="")
+} else if (x %in% seconds) {
+  ordval <- paste(x,"nd", sep="")
+} else if (x %in% thirds) {
+  ordval <- paste(x,"rd", sep="")
+} else {
+  ordval <- paste(x,"th", sep="")
+}
+  return(ordval)
+}
+```
+
+We can test this to see if it worked by inputting values and trying it. 
+
+```{r}
+apstyleordinal(37)
+```
+
+Now with that function in place, we can create a new dataframe that has all the pieces we'll need to write a few paragraphs of a story. We'll first join the two tables together, create a percentage of the labor force number, sorting by that percentage, ranking by that percentage, then applying my apstyle to each row using the rowwise function before applying the function.
+
+```{r}
+percents <- countycounts %>% 
+  left_join(laborforce) %>% 
+  filter(LaborForce > 0) %>% # gets rid of two non-counties.
+  mutate(Percent = round((total/LaborForce)*100, digits=1)) %>% 
+  arrange(desc(Percent)) %>% 
+  mutate(Rank = row_number()) %>% 
+  rowwise() %>% 
+  mutate(OrdinalRank = apstyleordinal(Rank))
+```
+
+Now we can start "writing". 
+
+What glue lets you do is use fields from your dataframe to plug into sentences using {} to template in where they go. So I can write a sentence like "This sentence is about {County} County" and it will write 49 sentences starting with Hall County, Douglas County, Buffalo County because those are the first three counties in the dataset. Really, this is just a game of programming mad libs. We write a sentence and where we have data that could fill the spot, we put it in there. 
+
+You'll notice some `\` characters showing up in there. Those are called escape characters, and what it means is that the thing that comes next is special. The text, you'll see, is wrapped in an apostrophe, so anywhere we use apostrophes, like in a conjunction, we have to escape that apostrope so R doesn't think our glue function has ended. In the case of `\n`, it means insert a new line here. So the computer equivalent of hitting the enter key. 
+
+Here's what I came up with, which adds a new column to my dataframe called story, which is what you think it is. 
+
+```{r}
+stories <- percents %>% mutate(story = glue(
+  'From March 21 to June 20 in {County} County, {format(total, nsmall=0, big.mark=",")} people made unemployment claims. That\'s {Percent} percent of the county\'s labor force, according to a US Department of Labor estimate of the number of workers from March.\n\nWhen compared to the 49 other counties in the state where the Nebraska Department of Labor provided local data, {County} County ranks {OrdinalRank}.\n\nThe situation, though, is likely worse.\n\nThe numbers don\'t include 253 claims from counties with too few claims to preserve privacy rules. But those are dwarfed by the more than 16,000 claims where the department doesn\'t know which county it came from yet. Unknown would be the third largest county by claims. 
+  
+  '
+))
+```
+
+```{r}
+paragraphtwo <- lastyearunemployment %>% mutate(story = glue( 'In  all of the 49 counties tested, the unemployment rate increased during the pandemic. In February of this year, {County} County had an unemployment rate of {Percent} percent.' ))
+```
+
+Now let's make a function that takes in a county name and writes a headline, creates a filename unique to each county and writes out a text file that has the headline and the story in it.
+
+```{r}
+makeStory <- function(cnty){
+  x <- stories %>% filter(County == cnty)
+  headline <- paste(x$Percent, " percent of ", x$County, " County workers have claimed unemployment during pandemic", sep="")
+  filename <- paste("stories/", cnty, ".txt", sep="")
+  writeLines(c(headline,"\n\n", x$story), filename)
+}
+```
+
+Now we use `purr`'s map function to iterate over each county in the stories dataframe to write a story. 
+```{r}
+library(purrr)
+```
+```{r}
+makestory(ggsave)
+```
+
+```{r}
+map(paragraphtwo$lastyearunemployment, ~paragraphtwo(.))
+```
+
+And there you have it, four paragraphs of a story about 49 different counties. With a little more creativity, we could come up with a few other paragraphs, and with some reporting we can come up with some more information in it.
+
+## Making local charts
+
+For charting, we need two things: A function that creates a chart, and the purr function to repeat it over and over again. 
+
+First, the function. This function will:
+
+* Create a headline so the headline is locally relevant. In this case, it's a cheat since every county is down from the peak. 
+* Create a filename that's a path to a folder and then the name of the county with .png appended to the end of it. So `graphics/Hall.png` so editors can find their county very quickly, or take other counties they may be interested in. 
+* Then uses ggplot to make a simple line chart of the number of claims per week in that county. 
+* At the end, uses ggsave to save the pre-made filename to the location with the specified dimensions. 
+
+```{r}
+makeChart <- function(cnty){
+  headline <- paste(cnty, " County unemployment claims are down from the peak", sep="")
+  filename <- paste("graphics/", cnty, ".png", sep="")
+  stateclaims %>% filter(County == cnty) %>% ggplot() + geom_line(aes(x=Date, y=Claims, group=1)) + labs(title=headline, subtitle = "More unemployment claims have been filed in 2020 than any other year on record in Nebraska", x="", y="Claims", caption = "Source: Nebraska Department of Labor | Graphic by Nebraska News Service") +
+  scale_x_date(date_labels = "%B") + 
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 8), 
+    plot.subtitle = element_text(size=10), 
+    panel.grid.minor = element_blank()
+    ) + ggsave(filename, width=8, height=4)
+}
+```
+
+Now we'll use purr to repeat that function over and over for the whole of the dataset. We'll use map, which is a way of repeating it over a set of data. In this case, we want to pass the name of the county from percents -- which is our dataframe of actual counties that we are interested in -- to filter our charts in the function above. So it'll find each county, pass it to makeChart and save it to a file. 
+
+```{r}
+map(percents$County, ~makeChart(.))
+```
+
+## One last addition to our story: a map.
+
+We'll go through this quickly. Need the simple features library. 
+```{r}
+library(sf)
+```
+
+Importing county map from the census bureau and filtering out Nebraska. 
+
+```{r}
+counties <- read_sf("data/cb_2018_us_county_500k/cb_2018_us_county_500k.shp") %>% filter(STATEFP == 31)
+```
+
+Now we'll join percents to the map using GEOID. 
+
+```{r}
+formap <- counties %>% left_join(percents)
+```
+
+Now we shade each county by the percent of the labor force submitting claims and adding some theming and titling. 
+
+```{r}
+ggplot() + 
+  geom_sf(data=formap, aes(fill=Percent)) + 
+  theme_void() + 
+  scale_fill_viridis_c("Percent\nof workforce", option = "plasma") + 
+  labs(title="Where jobless claims are hurting the most", subtitle="The first look at local unemployment data shows unemployment mirrors virus hotspots.", caption="Source: Nebraska Department of Labor | Map by the Nebraska News Service") + 
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 8), 
+    plot.subtitle = element_text(size=10), 
+    panel.grid.minor = element_blank()
+    ) + ggsave("graphics/map.png", width=8, height=5)
+```
+
+And now, we've created some localized text, a localized graphic and a map that will work for the whole state. Not bad for some simple code tricks. 
